@@ -1,0 +1,192 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  AwsRegion:
+    Type: String
+    Default: us-east-1
+  LambdaCodeBucket:
+    Type: String
+    Default: nyu-spring22-cloud-spamclassifier-cf-lambda1
+  LambdaCodeKey:
+    Type: String
+    Default: spamClassifierLF1.zip
+  BS4LambdaLayerKey:
+    Type: String
+    Default: bs4.zip
+  BS4LambdaLayerName:
+    Type: String
+    Default: bs4-1123
+  LambdaFunctionName:
+    Type: String
+    Default: spamClassifierLF11123
+  LambdaFunctionTimeout:
+    Type: Number
+    Default: 90
+  LambdaRoleName:
+    Type: String
+    Default: spamClassifierLF1-role1123
+  EndPointName:
+    Type: String
+    Default: sms-spam-classifier-mxnet-2022-04-26-00-14-46-704
+  S3BucketS1:
+    Type: String
+    Default: nyu-spring22-cloud-spamclassifier-s1-1123
+  SESReceiptRuleSetName:
+    Type: String
+    Default: nyu-spring22-cloud-spamclassifier-s1-1123
+  SESReceiptRuleName:
+    Type: String
+    Default: nyu-spring22-cloud-spamclassifier-1123
+  SESVerifiedEmailReceipient:
+    Type: String
+    Default: cloud@mss9238.click
+
+Resources:
+  SpamClassifierLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref LambdaRoleName
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+            - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Path: /
+      Policies:
+        - PolicyName: LambdaReadS3Policy1123
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                - s3:GetObject
+                Effect: Allow
+                Resource: '*'
+        - PolicyName: SESSendEmailAccess1123
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - ses:SendEmail
+                Effect: Allow
+                Resource: '*'
+
+  BS4LambdaLayer:
+    Type: "AWS::Lambda::LayerVersion"
+    Properties:
+      CompatibleRuntimes:
+        - python3.7
+      Content:
+        S3Bucket:
+          Ref: LambdaCodeBucket
+        S3Key:
+          Ref: BS4LambdaLayerKey
+      LayerName: !Ref BS4LambdaLayerName
+
+  SpamClassifierLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.7
+      Role: !GetAtt SpamClassifierLambdaRole.Arn
+      Code:
+        S3Bucket:
+          Ref: LambdaCodeBucket
+        S3Key:
+          Ref: LambdaCodeKey
+      Timeout: !Ref LambdaFunctionTimeout
+      Layers:
+        - !Ref BS4LambdaLayer
+        - arn:aws:lambda:us-east-1:668099181075:layer:AWSLambda-Python37-SciPy1x:115
+      Environment:
+        Variables:
+          AwsRegion: !Ref AwsRegion
+          ENDPOINT_NAME: !Ref EndPointName
+
+  SpamClassifierLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        !Join
+          - ''
+          - - '/aws'
+            - '/lambda'
+            - '/'
+            - !Ref SpamClassifierLambdaFunction
+      RetentionInDays: 1
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt:
+          - SpamClassifierLambdaFunction
+          - Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount:
+        Ref: AWS::AccountId
+      SourceArn:
+        Fn::Sub: arn:aws:s3:::${S3BucketS1}
+#        !GetAtt SpamClassifierS1Bucket.Arn
+
+  SpamClassifierS1Bucket:
+    DependsOn: LambdaInvokePermission
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketS1
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Function:
+              Fn::GetAtt:
+                - SpamClassifierLambdaFunction
+                - Arn
+            Event: s3:ObjectCreated:Put
+
+  SpamClassifierS1BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SpamClassifierS1Bucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+            - Sid: AllowSESPuts
+              Effect: Allow
+              Principal:
+                Service: ses.amazonaws.com
+              Action: s3:PutObject
+              Resource:
+                !Join
+                  - ''
+                  - - !GetAtt SpamClassifierS1Bucket.Arn
+                    - '/*'
+#              Condition:
+#                StringEquals:
+#                  aws::Referer: !Sub ${AWS::AccountId}
+
+  SESReceiptRuleSet:
+    Type: AWS::SES::ReceiptRuleSet
+    Properties:
+      RuleSetName: !Ref SESReceiptRuleSetName
+
+  SESReceiptRule:
+    DependsOn:
+      - SpamClassifierS1Bucket
+      - SpamClassifierS1BucketPolicy
+    Type: AWS::SES::ReceiptRule
+    Properties:
+      RuleSetName: !Ref SESReceiptRuleSetName
+      Rule:
+        Actions:
+          - S3Action:
+              BucketName: !Ref S3BucketS1
+        Enabled: True
+        Name: !Ref SESReceiptRuleName
+        Recipients:
+          - !Ref SESVerifiedEmailReceipient
